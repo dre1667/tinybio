@@ -22,6 +22,8 @@ PBMC3k (2700 cells × 32738 genes) → CPM → log1p → top-2000 HVGs → z-sco
 
 **Reading:** numerically correct against scanpy's arpack reference. At PBMC3k scale (2700 cells, 2000 genes after HVG) the CPU path is 1.9× faster — this is the expected regime where the scatter-rasterization benchmark (see [docs/rasterize_benchmarks.md](./docs/rasterize_benchmarks.md)) also shows the GPU losing to CPU, since Thunderbolt + kernel-launch overhead dominates small problems. The headline speedup story is at PBMC68k / atlas scale (Milestone 3).
 
+`DEV=AMD JITBEAM=2` gives the same timing as plain `DEV=AMD` on this workload (157 ms vs 160 ms warm, 1400 ms vs 1460 ms cold) — we are launch-bound, not compute-bound, so per-kernel autotune doesn't help. The `TinyJit`-captured-graph path (fusing the 14 matmul launches into one) is the obvious next optimization; deferred to M2.
+
 Benchmark with `DEV=AMD python3 examples/pbmc3k_pca.py`.
 
 ## Install (planned)

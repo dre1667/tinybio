@@ -41,3 +41,24 @@ single captured graph via JIT so kernel launch overhead amortizes.
 Probably not a blocker for us — the randomized SVD path is the standard
 production choice for truncated SVD anyway, and it's what scanpy and
 scikit-learn use under the hood.
+
+---
+
+## `JITBEAM=2` does not accelerate `tinybio.pca.pca` on PBMC3k
+
+**Symptom.** Running `examples/pbmc3k_pca.py` with `DEV=AMD JITBEAM=2
+PARALLEL=10` vs plain `DEV=AMD` yields nearly identical timings (warm
+median: 157 vs 160 ms; cold: 1400 vs 1460 ms).
+
+**Cause.** The randomized SVD issues ~14 separate GPU matmul launches
+per call across Thunderbolt 4. At this scale the wall time is dominated
+by per-kernel *dispatch latency* (TB4 round-trip ~0.1–0.5 ms × 14 +
+Python overhead), not kernel *compute time*. `JITBEAM` autotunes each
+individual kernel's inner loop shape, which helps when compute dominates
+but does nothing for launch overhead.
+
+**Fix (deferred, M2).** Wrap the whole randomized-SVD call in
+`@TinyJit` so tinygrad captures the entire matmul sequence as a single
+graph and amortizes dispatch. That's the path that usually flips
+launch-bound small-workload GPU code from loss to win. Not done this
+session — in scope for M2 package work.
