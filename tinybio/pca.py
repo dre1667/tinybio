@@ -6,15 +6,17 @@ runs ``num * log2(num) * 2 + 2`` sweeps per call (~44k sweeps for a
 Thunderbolt that is ~10^6 kernel launches and effectively unusable on
 realistic single-cell data. See BUGS.md.
 
-We use randomized SVD (Halko, Martinsson & Tropp 2011): a handful of
-large matmuls on the GPU, thin QRs on the CPU, and one small SVD on the
-CPU at the end. For (m, n) input with top-k target, the GPU does a
-constant 3 + 2*n_iter large matmuls regardless of m, n, k.
+We use randomized SVD (Halko, Martinsson & Tropp 2011). Each PCA call
+issues a constant number of large matmuls on the GPU, thin QRs on the
+CPU, and one small SVD on the CPU at the end. The inner A-operator
+application ``X @ (X.T @ Q)`` is captured with ``TinyJit`` so the two
+matmuls dispatch as one graph, amortizing Thunderbolt launch latency
+that otherwise dominates wall time for this workload.
 """
 from __future__ import annotations
 
 import numpy as np
-from tinygrad import Tensor
+from tinygrad import Tensor, TinyJit
 
 
 def _thin_qr_cpu(Y: Tensor) -> Tensor:
@@ -22,6 +24,25 @@ def _thin_qr_cpu(Y: Tensor) -> Tensor:
     Y_np = Y.realize().numpy()
     Q_np, _ = np.linalg.qr(Y_np, mode="reduced")
     return Tensor(Q_np.astype(np.float32))
+
+
+_APPLY_A_CACHE: dict[tuple, "TinyJit"] = {}
+
+
+def _apply_A(X: Tensor, Q: Tensor) -> Tensor:
+    """One-sided power step: returns ``X @ (X.T @ Q)``.
+
+    Each unique ``(X.shape, Q.shape)`` pair is captured as its own JIT
+    graph and cached, so the two matmuls fuse into a single dispatch on
+    repeat calls. This is the load-bearing optimization for small-to-
+    medium inputs where per-kernel launch latency dominates.
+    """
+    key = (tuple(X.shape), tuple(Q.shape))
+    fn = _APPLY_A_CACHE.get(key)
+    if fn is None:
+        fn = TinyJit(lambda X_, Q_: (X_ @ (X_.T @ Q_)).realize())
+        _APPLY_A_CACHE[key] = fn
+    return fn(X, Q)
 
 
 def randomized_svd(
@@ -40,10 +61,11 @@ def randomized_svd(
     n_components : int
         Number of singular triples to return.
     n_iter : int
-        Number of subspace iterations. Higher → more accurate but slower.
-        Default 10 reaches top-10 cosine > 0.999 vs scanpy on scRNA-seq
-        data in local testing; sklearn's ``randomized_svd`` default is 7,
-        which is a bit too lax for slow-decay spectra like PBMC3k.
+        Number of one-sided power iterations. Higher → more accurate
+        but slower. Default 10 reaches top-10 cosine > 0.999 vs scanpy on
+        scRNA-seq data in local testing; sklearn's ``randomized_svd``
+        default is 7, which is a bit too lax for slow-decay spectra
+        like PBMC3k.
     oversample : int
         Extra probe columns beyond ``n_components`` for stability. Higher
         values better resolve clusters of close singular values.
@@ -67,15 +89,12 @@ def randomized_svd(
         )
 
     rng = np.random.default_rng(seed)
-    Omega_np = rng.standard_normal(size=(n, l)).astype(np.float32)
-    Omega = Tensor(Omega_np)
+    Omega = Tensor(rng.standard_normal(size=(n, l)).astype(np.float32))
 
-    Y = X @ Omega
+    Y = (X @ Omega).realize()
     for _ in range(n_iter):
         Q = _thin_qr_cpu(Y)
-        Z = X.T @ Q
-        Q2 = _thin_qr_cpu(Z)
-        Y = X @ Q2
+        Y = _apply_A(X, Q)
     Q = _thin_qr_cpu(Y)
 
     B = (Q.T @ X).realize().numpy()
