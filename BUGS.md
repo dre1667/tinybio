@@ -57,8 +57,34 @@ Python overhead), not kernel *compute time*. `JITBEAM` autotunes each
 individual kernel's inner loop shape, which helps when compute dominates
 but does nothing for launch overhead.
 
-**Fix (deferred, M2).** Wrap the whole randomized-SVD call in
-`@TinyJit` so tinygrad captures the entire matmul sequence as a single
-graph and amortizes dispatch. That's the path that usually flips
-launch-bound small-workload GPU code from loss to win. Not done this
-session — in scope for M2 package work.
+**Fix (landed).** Two changes stacked in M2 took PBMC68k from 1.7 s
+(tied with scanpy) to 564 ms (2.93× faster):
+
+1. `@TinyJit` on the one-sided power step `X @ (X.T @ Q)` with a
+   shape-keyed cache. Fuses the two matmuls into one captured graph
+   per `(X.shape, Q.shape)` pair.
+2. GPU-resident orthonormalization: compute `G = Y.T @ Y` on the GPU,
+   eigendecompose the tiny `(l, l)` block on CPU, apply `V diag(w^-1/2)
+   V.T` back on the GPU — transferring ~25 kB per step instead of the
+   full `(rows, l)` probe. At 245 k cells this is the difference
+   between 0.5 ms and 680 ms per orthonormalization; see the profile
+   in `examples/profile_tms.py`.
+
+---
+
+## `numpy.linalg.qr` on tall-thin matrices is mystery-slow on Apple Accelerate
+
+**Symptom.** At `(245389, 80)` shape, `numpy.linalg.qr(Y, mode="reduced")`
+takes ~680 ms per call on an M4 Pro. Eleven calls per PCA invocation =
+7.5 s wall time, dominating everything else. The theoretical work
+(Householder reduction plus Q accumulation, ~6.3 GFLOPs) should take
+~20 ms on threaded LAPACK.
+
+**Cause.** Not conclusively identified — Apple Accelerate's tall-skinny
+QR path appears to run effectively single-threaded for this shape class
+in the numpy binding. Same code on scipy/OpenBLAS is much closer to the
+theoretical throughput.
+
+**Fix.** Skip numpy QR entirely: use Cholesky-QR / eigendecomposition
+of the `(l, l)` Gram matrix instead, which keeps everything but the
+tiny `l × l` block on the GPU. See the `_chol_qr` note above.

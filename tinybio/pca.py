@@ -19,11 +19,31 @@ import numpy as np
 from tinygrad import Tensor, TinyJit
 
 
-def _thin_qr_cpu(Y: Tensor) -> Tensor:
-    """Economy QR via numpy on CPU. Fast for (rows, l) with l small."""
-    Y_np = Y.realize().numpy()
-    Q_np, _ = np.linalg.qr(Y_np, mode="reduced")
-    return Tensor(Q_np.astype(np.float32))
+def _chol_qr(Y: Tensor, jitter: float = 1e-8, refine: bool = False) -> Tensor:
+    """Thin orthonormalization via Gram-matrix eigendecomposition, GPU-resident result.
+
+    ``Y`` shape ``(rows, l)`` with ``l`` small (tens to low hundreds).
+    Computes the tiny ``(l, l)`` Gram matrix ``G = Y.T @ Y`` on the GPU,
+    eigendecomposes ``G = V diag(w) V.T`` on the CPU (sub-ms at l=80),
+    and returns ``Y @ V diag(w**-0.5) V.T`` on the GPU. Only the
+    ``(l, l)`` block (~25 kB at l=80) crosses Thunderbolt, not the full
+    ``(rows, l)`` probe — this is the difference between <1 ms and
+    hundreds of ms per orthonormalization at ≥100k rows.
+
+    Using ``eigh`` instead of ``cholesky`` makes the method robust to
+    rank deficiency (e.g., before the first power iteration amplifies
+    the subspace). Tiny extra cost at this ``l`` is invisible in the
+    overall budget.
+
+    ``refine=True`` applies the procedure twice, the standard fix for
+    the one-pass variant's accuracy loss on ill-conditioned ``Y``.
+    """
+    G = (Y.T @ Y).realize().numpy().astype(np.float64)
+    w, V = np.linalg.eigh(G)
+    w_floor = max(w.max() * jitter, jitter)
+    inv_sqrt = V @ np.diag(1.0 / np.sqrt(np.clip(w, w_floor, None))) @ V.T
+    Q = Y @ Tensor(inv_sqrt.astype(np.float32))
+    return _chol_qr(Q, jitter=jitter, refine=False) if refine else Q
 
 
 _APPLY_A_CACHE: dict[tuple, "TinyJit"] = {}
@@ -93,9 +113,10 @@ def randomized_svd(
 
     Y = (X @ Omega).realize()
     for _ in range(n_iter):
-        Q = _thin_qr_cpu(Y)
+        Q = _chol_qr(Y)
         Y = _apply_A(X, Q)
-    Q = _thin_qr_cpu(Y)
+    # Final orthonormalization with refinement — this basis feeds B = Q.T @ X.
+    Q = _chol_qr(Y, refine=True)
 
     B = (Q.T @ X).realize().numpy()
     Ub, S, Vt = np.linalg.svd(B, full_matrices=False)

@@ -28,7 +28,11 @@ def test_singular_values_match_numpy_on_low_rank():
     X_np = _synthetic_low_rank(400, 120, rank=30)
     _, S_t, _ = randomized_svd(Tensor(X_np), n_components=10, n_iter=7, seed=42)
     S_ref = np.linalg.svd(X_np, full_matrices=False)[1][:10]
-    np.testing.assert_allclose(S_t, S_ref, rtol=1e-5)
+    # rtol 1e-4 is deliberate: eigh-based orthonormalization trades ~1 digit
+    # of precision vs Householder QR in exchange for eliminating the CPU
+    # round-trip on ≥100k-row matrices (see BUGS.md). For the PCA use case
+    # 4 digits on singular values is well inside any downstream tolerance.
+    np.testing.assert_allclose(S_t, S_ref, rtol=1e-4)
 
 
 def test_top_singular_vectors_match_numpy_on_low_rank():
