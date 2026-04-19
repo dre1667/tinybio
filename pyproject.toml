@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tinybio"
+version = "0.0.1"
+description = "GPU-accelerated single-cell RNA-seq preprocessing on tinygrad (AMD eGPU on macOS)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.13"
+authors = [
+  { name = "dre1667" },
+]
+keywords = ["tinygrad", "single-cell", "rna-seq", "pca", "bioinformatics", "scanpy", "amd", "egpu"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+dependencies = [
+  "tinygrad",
+  "anndata>=0.10",
+  "numpy>=1.26",
+  "scipy>=1.11",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "scanpy>=1.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/dre1667/tinybio"
+Issues = "https://github.com/dre1667/tinybio/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tinybio*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "slow: downloads datasets / hits GPU; skip with `pytest -m \"not slow\"`",
+]
