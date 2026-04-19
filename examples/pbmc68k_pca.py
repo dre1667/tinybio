@@ -22,6 +22,7 @@ import numpy as np
 import scanpy as sc
 from tinygrad import Tensor
 
+from tinybio.normalize import scale as tb_scale
 from tinybio.pca import pca as tb_pca
 
 N_COMPONENTS = 50
@@ -59,20 +60,29 @@ def load_and_prep() -> np.ndarray:
     adata = sc.read_10x_mtx(mtx_dir, var_names="gene_symbols", cache=True)
     print(f"  raw: {adata.shape[0]} cells × {adata.shape[1]} genes, dtype={adata.X.dtype}")
 
-    print("Preprocessing (normalize_total → log1p → HVG → scale)...", flush=True)
+    print("Preprocessing (normalize_total → log1p → HVG; sparse, CPU)...", flush=True)
     sc.pp.normalize_total(adata, target_sum=1e6)
     sc.pp.log1p(adata)
     sc.pp.highly_variable_genes(adata, n_top_genes=N_TOP_HVG, flavor="seurat", subset=True)
-    sc.pp.scale(adata, max_value=None)
-    X = np.ascontiguousarray(adata.X).astype(np.float32)
+    print("Densifying HVG subset → GPU scale...", flush=True)
+    X_np = adata.X.toarray().astype(np.float32, copy=False)
+    del adata
+    X_tg = tb_scale(Tensor(X_np).realize()).realize()
+    X = X_tg.numpy()
     print(f"  preprocessed: {X.shape[0]} cells × {X.shape[1]} genes, dtype={X.dtype}, "
           f"size={X.nbytes/1e6:.1f} MB")
     return X
 
 
+# Measured on PBMC68k: n_iter=7 hits top-10 cos 0.999953 vs n_iter=10's
+# 0.999960 — both well above the 0.999 target — but at ~35% less compute.
+# Real scRNA-seq spectra converge faster than the worst-case default.
+N_ITER = 7
+
+
 def tinygrad_pca(X_np: np.ndarray):
     X = Tensor(X_np).realize()
-    return tb_pca(X, n_components=N_COMPONENTS)
+    return tb_pca(X, n_components=N_COMPONENTS, n_iter=N_ITER)
 
 
 def scanpy_pca(X_np: np.ndarray):

@@ -108,8 +108,12 @@ def randomized_svd(
             f"use numpy.linalg.svd directly for such small matrices."
         )
 
-    rng = np.random.default_rng(seed)
-    Omega = Tensor(rng.standard_normal(size=(n, l)).astype(np.float32))
+    # Generate the random probe Omega directly on the target device so the
+    # ``(n, l)`` block (tens to hundreds of MB at atlas scale) never crosses
+    # Thunderbolt.
+    if seed is not None:
+        Tensor.manual_seed(seed)
+    Omega = Tensor.randn(n, l)
 
     Y = (X @ Omega).realize()
     for _ in range(n_iter):
