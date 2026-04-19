@@ -36,10 +36,12 @@ REAL_DATASETS = [
     # (label, n_cells, tinybio_ms, scanpy_ms)
     ("PBMC3k",        2_700,     54.2,     70.7),
     ("PBMC68k",      68_579,    778.7,  1597.4),
-    ("TMS droplet\n(245k, all tissues)",
-                    245_389,   2273.8,  3421.7),    # resident number for tinybio
+    ("TMS droplet\n(245k)",
+                    245_389,   2273.8,  3421.7),    # resident for tinybio
     ("Mouse 1.3M\nneurons",
-                  1_306_127,   9736.0, 162999.9),   # resident — scanpy 163 s, GPU 9.7 s
+                  1_306_127,   3543.5, 151800.8),   # resident, warm cache, n_iter=5
+    ("HLCA 1.5M\n(human lung)",
+                  1_500_000,   3359.9,  97978.0),   # resident, warm cache, n_iter=5
 ]
 
 SYNTH_SCALE = [

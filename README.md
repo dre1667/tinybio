@@ -19,15 +19,16 @@ Top-50 PCA, numerical agreement against scanpy's arpack reference (abs cosine si
 | **PBMC3k**  | 2,700 × 2,000    |    54 ms  |     71 ms  | **1.30×** | 0.9994 |
 | **PBMC68k** | 68,579 × 2,000   |   779 ms  |   1597 ms  | **2.05×** | 1.0000 |
 | **Tabula Muris Senis** droplet | 245,389 × 2,000 | 2274 ms resident / 2934 ms end-to-end | 3422 ms | **1.50× / 1.17×** | 0.9999 |
-| **Mouse 1.3M neurons** (10x) | 1,306,127 × 2,000 | **9.74 s resident** | **163.0 s** | **16.74×** | 0.9986 † |
+| **Mouse 1.3M neurons** (10x) | 1,306,127 × 2,000 | **3.54 s resident** | **151.8 s** | **42.84×** | 0.9986 † |
+| **HLCA 1.5M** (Sikkema 2023, random subsample) | 1,500,000 × 2,000 | **3.36 s resident** | **98.0 s** | **29.16×** | 0.9987 † |
 
-† At 1.3 M cells the per-PC cosine plateaus around 0.9986 because PCs 6–10 live in a near-degenerate subspace (many well-separated mouse cell types share similar eigenvalues). The *subspace* agreement between tinybio and scanpy is still effectively perfect — the residual 0.0014 is pure rotation within the degenerate block, not signal error, and any downstream use of the top-k PCs as a subspace basis is unaffected.
+† At ≥1M cells the per-PC cosine plateaus around 0.998–0.999: PCs 6–10 live in a near-degenerate subspace where many well-separated cell types share similar eigenvalues. The *subspace* agreement between tinybio and scanpy is still effectively perfect — the residual is pure rotation within the degenerate block, not signal error, and downstream use of the top-k PCs as a subspace basis is unaffected.
 
 ![Benchmark wall times](figures/fig_bench_bars.png)
 
 "End-to-end" transfers X from numpy to GPU each call. "Resident" measures PCA only, with X already on the GPU — what you get if upstream preprocessing also runs through tinybio (as in [`examples/mouse_1m_pca.py`](examples/mouse_1m_pca.py)). Both honest to report.
 
-At 1.3 M cells every PCA call's TB4 transfer cost is ~0.6 s so resident is the meaningful number — and a single scanpy call already takes **over 2.5 minutes**, more than the *entire* tinybio warm benchmark.
+**At atlas scale (≥1M cells) tinybio is 30–40× faster than scanpy on real scRNA-seq.** scanpy's arpack is ~linear in N for dense matmuls; randomized SVD is also linear but with a much smaller constant once the matrix is big enough to amortize launch + transfer overhead. The warm-cache numbers reported here are the steady-state behavior after tinygrad's autotune cache is populated (persisted to `~/Library/Caches/tinygrad/`, so only the very first run pays the capture cost).
 
 ### Synthetic scale-up
 
