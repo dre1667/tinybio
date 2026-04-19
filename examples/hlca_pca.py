@@ -24,6 +24,7 @@ from pathlib import Path
 import anndata as ad
 import numpy as np
 import scanpy as sc
+from sklearn.utils.extmath import randomized_svd as sk_randomized_svd
 from tinygrad import Tensor
 
 from tinybio.normalize import scale as tb_scale
@@ -113,6 +114,16 @@ def tinygrad_pca_resident(X_tg: Tensor):
     return tb_pca(X_tg, n_components=N_COMPONENTS, n_iter=N_ITER)
 
 
+def sklearn_pca(X_np: np.ndarray):
+    """Pure-CPU randomized SVD — sklearn is the closest apples-to-apples
+    CPU equivalent of tinybio's algorithm. Separates "GPU beats CPU" from
+    "this library beats scanpy's arpack."
+    """
+    U, S, _ = sk_randomized_svd(X_np, n_components=N_COMPONENTS,
+                                 n_iter=N_ITER, random_state=0)
+    return U * S, S
+
+
 def time_fn(fn, X, n_runs: int):
     ts = []
     for _ in range(n_runs):
@@ -143,44 +154,54 @@ def main() -> None:
     print(f"  tinygrad resident median: {tg_med*1000:>9.1f} ms   min: {tg_min*1000:>9.1f} ms")
 
     n = int(X_tg.shape[0])
-    # Attempt a real scanpy reference even though it's expected to OOM on a
-    # 24 GB Mac at this scale — user explicitly OK'd the risk. If it works,
-    # we have a real comparison; if not, we report the log-log projection.
-    emb_sc = None
-    sc_time = None
+    # Pull X to CPU once so both CPU baselines share the same buffer.
+    print("\nDownloading scaled matrix to CPU for CPU baselines (~12 GB)...", flush=True)
+    X_np_local = X_tg.numpy()
+
+    # sklearn randomized_svd — apples-to-apples algorithm vs tinybio (pure
+    # CPU, same algorithm, same n_iter). Isolates "GPU beats CPU".
+    emb_sk = None; sk_time = None
     try:
-        print("\nAttempting scanpy reference PCA (may OOM at 2.28M × 2000)...", flush=True)
-        X_np_local = X_tg.numpy()  # ~18 GB CPU buffer
+        print("sklearn randomized_svd reference (same algorithm as tinybio, CPU)...", flush=True)
+        t0 = time.perf_counter()
+        emb_sk, s_sk = sklearn_pca(X_np_local)
+        sk_time = time.perf_counter() - t0
+        print(f"  sklearn single call: {sk_time:.1f} s")
+    except Exception as e:
+        print(f"  sklearn reference skipped: {type(e).__name__}: {e}")
+
+    # scanpy arpack — "real-user" baseline (what everyone runs in practice).
+    emb_sc = None; sc_time = None
+    try:
+        print("scanpy reference PCA (arpack Lanczos, real-user default)...", flush=True)
         adata_ref = ad.AnnData(X=X_np_local)
         t0 = time.perf_counter()
         sc.pp.pca(adata_ref, n_comps=N_COMPONENTS)
         sc_time = time.perf_counter() - t0
         emb_sc = np.asarray(adata_ref.obsm["X_pca"])
-        del adata_ref, X_np_local
+        del adata_ref
         print(f"  scanpy single call: {sc_time:.1f} s")
-    except (MemoryError, Exception) as e:
+    except Exception as e:
         print(f"  scanpy reference skipped: {type(e).__name__}: {e}")
-        emb_sc = None
 
-    if emb_sc is not None:
-        # Per-PC cosine vs scanpy
-        A = emb_tg / np.linalg.norm(emb_tg, axis=0, keepdims=True).clip(1e-12)
-        B = emb_sc / np.linalg.norm(emb_sc, axis=0, keepdims=True).clip(1e-12)
-        cos = np.abs((A * B).sum(axis=0))
-        print("\nPer-component cosine vs scanpy:")
-        print(f"  top-10 min / mean: {cos[:10].min():.6f} / {cos[:10].mean():.6f}")
-        real_speedup = (sc_time * 1000) / (tg_med * 1000)
-        print(f"\nVerdict (real scanpy comparison):")
-        print(f"  n_cells : {n:,}")
-        print(f"  speed   : tinygrad {tg_med*1000:.0f} ms vs scanpy {sc_time*1000:,.0f} ms = {real_speedup:.2f}x")
-    else:
-        sc_proj = scanpy_projection_ms(n)
-        proj_speedup = sc_proj / (tg_med * 1000)
-        print(f"  scanpy projected        : {sc_proj:>9,.0f} ms (log-log fit from synthetic curve)")
-        print(f"\nVerdict (projected):")
-        print(f"  n_cells : {n:,}")
-        print(f"  speed   : tinygrad {tg_med*1000:.0f} ms vs scanpy projected {sc_proj:,.0f} ms = {proj_speedup:.1f}x")
+    del X_np_local  # free the 12 GB CPU buffer before verdict / any further work
 
+    print(f"\n{'='*78}")
+    print(f"HLCA n={n:,}  |  top-50 PCA")
+    print(f"{'='*78}")
+    def cos_vs(A, B):
+        A = A / np.linalg.norm(A, axis=0, keepdims=True).clip(1e-12)
+        B = B / np.linalg.norm(B, axis=0, keepdims=True).clip(1e-12)
+        return np.abs((A * B).sum(axis=0))
+    print(f"  tinybio (AMD eGPU, resident):  {tg_med*1000:>10,.0f} ms")
+    if sk_time is not None:
+        print(f"  sklearn randomized_svd (CPU):  {sk_time*1000:>10,.0f} ms   → GPU {sk_time/tg_med:>5.2f}x faster (same algorithm)")
+        cos = cos_vs(emb_tg, emb_sk)
+        print(f"     top-10 min/mean cos vs sklearn: {cos[:10].min():.6f} / {cos[:10].mean():.6f}")
+    if sc_time is not None:
+        print(f"  scanpy (CPU, arpack):          {sc_time*1000:>10,.0f} ms   → GPU {sc_time/tg_med:>5.2f}x faster (real-user default)")
+        cos = cos_vs(emb_tg, emb_sc)
+        print(f"     top-10 min/mean cos vs scanpy:  {cos[:10].min():.6f} / {cos[:10].mean():.6f}")
     print("\nSingular values, top 5:")
     print(f"  tinygrad: {np.array2string(s_tg[:5], precision=3)}")
 

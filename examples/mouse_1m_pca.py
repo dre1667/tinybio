@@ -23,6 +23,7 @@ from pathlib import Path
 import anndata as ad
 import numpy as np
 import scanpy as sc
+from sklearn.utils.extmath import randomized_svd as sk_randomized_svd
 from tinygrad import Tensor
 
 from tinybio.normalize import scale as tb_scale
@@ -132,6 +133,13 @@ def scanpy_pca(X_np: np.ndarray):
     return emb, s
 
 
+def sklearn_pca(X_np: np.ndarray):
+    """CPU randomized SVD — same algorithm as tinybio, apples-to-apples."""
+    U, S, _ = sk_randomized_svd(X_np, n_components=N_COMPONENTS,
+                                 n_iter=N_ITER, random_state=0)
+    return U * S, S
+
+
 def abs_cosine_per_component(A: np.ndarray, B: np.ndarray) -> np.ndarray:
     A = A / np.linalg.norm(A, axis=0, keepdims=True).clip(1e-12)
     B = B / np.linalg.norm(B, axis=0, keepdims=True).clip(1e-12)
@@ -155,11 +163,17 @@ def main() -> None:
     emb_tg, s_tg = tinygrad_pca_resident(X_tg)
     print(f"  cold: {(time.perf_counter()-t0)*1000:.1f} ms")
 
-    print("\nscanpy reference PCA (timed once, single call — avoids double-allocating a 10 GB copy)...", flush=True)
+    print("\nsklearn randomized_svd reference (same algorithm as tinybio, CPU)...", flush=True)
+    t0 = time.perf_counter()
+    emb_sk, s_sk = sklearn_pca(X_np)
+    sk_single = time.perf_counter() - t0
+    print(f"  sklearn single call: {sk_single:.1f} s")
+
+    print("\nscanpy reference PCA (timed once — avoids double-allocating a 10 GB copy)...", flush=True)
     t0 = time.perf_counter()
     emb_sc, s_sc = scanpy_pca(X_np)
     sc_single = time.perf_counter() - t0
-    print(f"  scanpy single call: {sc_single*1000:.1f} ms")
+    print(f"  scanpy single call: {sc_single:.1f} s")
 
     cos = abs_cosine_per_component(emb_tg, emb_sc)
     print("\nPer-component cosine similarity (abs, sign-flip safe):")
@@ -170,18 +184,24 @@ def main() -> None:
     print(f"  tinygrad: {np.array2string(s_tg[:5], precision=3)}")
     print(f"  scanpy  : {np.array2string(s_sc[:5], precision=3)}")
 
-    print(f"\nBenchmark: median of {N_RUNS} warm runs, tinygrad only (single scanpy reference above)", flush=True)
+    print(f"\nBenchmark: median of {N_RUNS} warm runs, tinygrad only", flush=True)
     tgr_med, tgr_min = time_fn(tinygrad_pca_resident, X_tg, N_RUNS)
     print(f"  tinygrad resident    median: {tgr_med*1000:>9.1f} ms   min: {tgr_min*1000:>9.1f} ms")
-    print(f"  scanpy (single call):         {sc_single*1000:>9.1f} ms")
-    sp_r = sc_single / tgr_med
-    print(f"  tinygrad resident is {sp_r:.2f}x " + ("faster" if sp_r >= 1 else "slower") + " than scanpy")
 
-    top10_min = float(cos[:10].min())
-    print("\nVerdict:")
-    print(f"  numerical: {'PASS' if top10_min >= 0.999 else 'FAIL'} "
-          f"(top-10 min cosine {top10_min:.4f}, target >= 0.999)")
-    print(f"  speed    : {sp_r:.2f}x resident (scanpy single call as reference)")
+    print(f"\n{'='*78}")
+    print(f"n={X_np.shape[0]:,}  top-50 PCA  (cosine vs scanpy reported where meaningful)")
+    print(f"{'='*78}")
+    print(f"  tinybio (AMD eGPU, resident):  {tgr_med*1000:>10,.0f} ms")
+    print(f"  sklearn randomized_svd (CPU):  {sk_single*1000:>10,.0f} ms   → GPU {sk_single/tgr_med:>5.2f}x faster (same algorithm)")
+    print(f"  scanpy (CPU, arpack):          {sc_single*1000:>10,.0f} ms   → GPU {sc_single/tgr_med:>5.2f}x faster (real-user default)")
+
+    def cos_vs(A, B):
+        An = A / np.linalg.norm(A, axis=0, keepdims=True).clip(1e-12)
+        Bn = B / np.linalg.norm(B, axis=0, keepdims=True).clip(1e-12)
+        return np.abs((An * Bn).sum(axis=0))
+    cos_sc = cos_vs(emb_tg, emb_sc); cos_sk = cos_vs(emb_tg, emb_sk)
+    print(f"\nTop-10 min/mean cosine vs scanpy:  {cos_sc[:10].min():.6f} / {cos_sc[:10].mean():.6f}")
+    print(f"Top-10 min/mean cosine vs sklearn: {cos_sk[:10].min():.6f} / {cos_sk[:10].mean():.6f}")
 
 
 if __name__ == "__main__":

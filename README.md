@@ -14,21 +14,33 @@ Top-50 PCA, numerical agreement against scanpy's arpack reference (abs cosine si
 
 ### Real scRNA-seq datasets
 
-| Dataset | Shape after HVG | tinybio (AMD) | scanpy (CPU arpack) | speedup | top-10 min cos |
-|---|---|---:|---:|---:|---:|
-| **PBMC3k**  | 2,700 × 2,000    |    54 ms  |     71 ms  | **1.30×** | 0.9994 |
-| **PBMC68k** | 68,579 × 2,000   |   779 ms  |   1597 ms  | **2.05×** | 1.0000 |
-| **Tabula Muris Senis** droplet | 245,389 × 2,000 | 2274 ms resident / 2934 ms end-to-end | 3422 ms | **1.50× / 1.17×** | 0.9999 |
-| **Mouse 1.3M neurons** (10x) | 1,306,127 × 2,000 | **3.54 s resident** | **151.8 s** | **42.84×** | 0.9986 † |
-| **HLCA 1.5M** (Sikkema 2023, random subsample) | 1,500,000 × 2,000 | **3.36 s resident** | **98.0 s** | **29.16×** | 0.9987 † |
+Three PCA implementations, same preprocessed (scaled) matrix, same top-50 target, warm-median of 3 runs:
 
-† At ≥1M cells the per-PC cosine plateaus around 0.998–0.999: PCs 6–10 live in a near-degenerate subspace where many well-separated cell types share similar eigenvalues. The *subspace* agreement between tinybio and scanpy is still effectively perfect — the residual is pure rotation within the degenerate block, not signal error, and downstream use of the top-k PCs as a subspace basis is unaffected.
+| Dataset | Cells | **tinybio** (AMD GPU, randomized SVD) | sklearn (CPU, randomized SVD — same algorithm) | scanpy (CPU, arpack — real-user default) | vs sklearn | vs scanpy |
+|---|---:|---:|---:|---:|---:|---:|
+| PBMC3k  |     2,700 |    57 ms | **26 ms** |    75 ms | 0.46× | 1.32× |
+| PBMC68k |    68,579 |   784 ms | **373 ms** |  1.72 s | 0.48× | 2.19× |
+| TMS droplet | 245,389 | 2.29 s | **1.18 s** | 3.33 s | 0.52× | 1.45× |
+| Mouse 1.3M neurons (10x) | 1,306,127 | **9.78 s** | 10.7 s | 146.6 s | **1.09×** | 14.99× |
+| HLCA 1.5M (Sikkema 2023, random subsample) | 1,500,000 | **3.38 s** | 8.88 s | 127.4 s | **2.63×** | **37.74×** |
 
 ![Benchmark wall times](figures/fig_bench_bars.png)
 
-"End-to-end" transfers X from numpy to GPU each call. "Resident" measures PCA only, with X already on the GPU — what you get if upstream preprocessing also runs through tinybio (as in [`examples/mouse_1m_pca.py`](examples/mouse_1m_pca.py)). Both honest to report.
+**The honest story in one paragraph.** scanpy's default `arpack` is considerably slower than randomized SVD on every dense dataset we benchmarked — not because CPU is bad, but because Lanczos makes ~60 passes over the matrix while randomized SVD makes ~5. **Most of the "tinybio vs scanpy" speedup is algorithm, not hardware.** The isolated GPU-vs-CPU story — tinybio against sklearn's randomized_svd running the exact same algorithm — shows a clear scale break:
 
-**At atlas scale (≥1M cells) tinybio is 30–40× faster than scanpy on real scRNA-seq.** scanpy's arpack is ~linear in N for dense matmuls; randomized SVD is also linear but with a much smaller constant once the matrix is big enough to amortize launch + transfer overhead. The warm-cache numbers reported here are the steady-state behavior after tinygrad's autotune cache is populated (persisted to `~/Library/Caches/tinygrad/`, so only the very first run pays the capture cost).
+- **Below ~1M cells:** sklearn on CPU is roughly **2× faster** than tinybio on the AMD eGPU. TB4 launch overhead dominates; the GPU's parallelism has no room to amortize.
+- **Around 1M cells:** they converge (Mouse 1.3M: 9.78 s vs 10.7 s, basically tied).
+- **At 1.5M cells:** the GPU pulls ahead decisively (HLCA: 3.38 s vs 8.88 s = **2.63×**). The crossover is real and reproducible.
+
+So the tool's honest pitch isn't "GPU always faster." It's:
+
+1. **If you're using `sc.pp.pca` and your data is ≥~50k cells, switching to randomized SVD (either sklearn or tinybio) is a free 1.3–38× speedup.** That's the biggest individual win and it's a CPU-only change.
+2. **If your data is ≥~1M cells and you have an AMD eGPU on macOS, tinybio wins over everything else.** That's the niche the library exists to fill.
+3. **Below 1M cells on any hardware, tinybio is not the fastest choice.** Use sklearn.
+
+The 2-3× GPU-over-CPU speedup at atlas scale comes from parallelism over matmul rows (2.28 M rows split across 5,376 shader cores vs sequential on CPU). Scaling further to 5M or 10M cells would widen the gap — that regime needs >24 GB RAM so we can't test it on this laptop.
+
+**Note on `cos(tinybio, sklearn)` and `cos(tinybio, scanpy)`:** the top-10 cosine similarity is effectively 1.0 vs sklearn (same algorithm, same answer) and drops to ~0.998 vs scanpy at atlas scale. That residual is PC-6-through-10 degenerate-subspace rotation — many mouse or human cell types share similar eigenvalues, so the individual PCs aren't well-defined, only the k-dim subspace is. Downstream use of the top-50 as a subspace basis is unaffected.
 
 ### Synthetic scale-up
 

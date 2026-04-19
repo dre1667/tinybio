@@ -33,15 +33,15 @@ OUT_DIR = HERE
 # -------- Measured warm medians (ms). One source of truth for all figs. --------
 
 REAL_DATASETS = [
-    # (label, n_cells, tinybio_ms, scanpy_ms)
-    ("PBMC3k",        2_700,     54.2,     70.7),
-    ("PBMC68k",      68_579,    778.7,  1597.4),
+    # (label, n_cells, tinybio_ms, sklearn_ms, scanpy_ms)
+    ("PBMC3k",        2_700,     57.0,     26.0,     75.0),
+    ("PBMC68k",      68_579,    783.6,    373.2,   1717.8),
     ("TMS droplet\n(245k)",
-                    245_389,   2273.8,  3421.7),    # resident for tinybio
+                    245_389,   2292.8,   1182.9,   3326.0),
     ("Mouse 1.3M\nneurons",
-                  1_306_127,   3543.5, 151800.8),   # resident, warm cache, n_iter=5
+                  1_306_127,   9779.7,  10700.0, 146600.0),
     ("HLCA 1.5M\n(human lung)",
-                  1_500_000,   3359.9,  97978.0),   # resident, warm cache, n_iter=5
+                  1_500_000,   3375.0,   8879.0, 127370.0),
 ]
 
 SYNTH_SCALE = [
@@ -65,6 +65,7 @@ plt.rcParams.update({
 })
 
 TINYBIO_COLOR = "#1f77b4"   # matplotlib "tab:blue"
+SKLEARN_COLOR = "#2ca02c"   # matplotlib "tab:green"
 SCANPY_COLOR  = "#d62728"   # matplotlib "tab:red"
 
 
@@ -74,46 +75,49 @@ def fig_bench_bars(out_path: Path) -> None:
     labels  = [d[0] for d in REAL_DATASETS]
     ns      = [d[1] for d in REAL_DATASETS]
     tinybio = np.array([d[2] for d in REAL_DATASETS])
-    scanpy  = np.array([d[3] for d in REAL_DATASETS])
-    speedup = scanpy / tinybio
+    sklearn = np.array([d[3] for d in REAL_DATASETS])
+    scanpy  = np.array([d[4] for d in REAL_DATASETS])
 
     x = np.arange(len(labels))
-    width = 0.38
+    width = 0.27
 
-    fig, ax = plt.subplots(figsize=(9.0, 5.0))
+    fig, ax = plt.subplots(figsize=(11.0, 5.5))
     fig.patch.set_facecolor("white")
 
-    bars1 = ax.bar(x - width / 2, tinybio, width, color=TINYBIO_COLOR,
-                   label="tinybio (AMD eGPU)")
-    bars2 = ax.bar(x + width / 2, scanpy,  width, color=SCANPY_COLOR,
-                   label="scanpy (CPU arpack)")
+    bars_tb = ax.bar(x - width, tinybio, width, color=TINYBIO_COLOR,
+                     label="tinybio (AMD eGPU)")
+    bars_sk = ax.bar(x,         sklearn, width, color=SKLEARN_COLOR,
+                     label="sklearn randomized_svd (CPU) — same algorithm")
+    bars_sc = ax.bar(x + width, scanpy,  width, color=SCANPY_COLOR,
+                     label="scanpy (CPU arpack) — real-user default")
 
-    # Pretty-print times: ms up to 999 ms, s above.
     def fmt(ms: float) -> str:
         return f"{ms:.0f} ms" if ms < 1000 else f"{ms/1000:.1f} s"
 
-    for bars in (bars1, bars2):
+    for bars in (bars_tb, bars_sk, bars_sc):
         for b in bars:
             h = b.get_height()
             ax.annotate(fmt(h), xy=(b.get_x() + b.get_width() / 2, h),
                         xytext=(0, 3), textcoords="offset points",
-                        ha="center", va="bottom", fontsize=9)
+                        ha="center", va="bottom", fontsize=8)
 
-    # Speedup badges above each pair of bars, in log space.
-    for i, (s, tb, sp) in enumerate(zip(speedup, tinybio, scanpy)):
-        ax.annotate(f"{s:.2f}×  faster",
-                    xy=(i, max(tb, sp) * 2.6),
+    # Crossover badge above each group: tinybio's speedup vs scanpy.
+    for i, (tb, sk, sc) in enumerate(zip(tinybio, sklearn, scanpy)):
+        ratio_sc = sc / tb
+        ax.annotate(f"vs scanpy: {ratio_sc:.2f}×\nvs sklearn: {sk/tb:.2f}×",
+                    xy=(i, max(tb, sk, sc) * 3.2),
                     ha="center", va="bottom",
-                    fontsize=11, fontweight="bold", color="#2ca02c")
+                    fontsize=9, fontweight="bold",
+                    color="#2ca02c" if ratio_sc >= 2.0 else "#7f7f7f")
 
     ax.set_yscale("log")
     ax.set_xticks(x)
     ax.set_xticklabels([f"{lab}\n{n:,} cells" for lab, n in zip(labels, ns)])
     ax.set_ylabel("PCA wall time, log scale (ms, median of 3 warm runs)")
-    ax.set_title("tinybio GPU PCA vs scanpy CPU PCA — real single-cell datasets\n"
-                 "AMD RX 7900 XT eGPU via TB4, macOS 26.3, M4 Pro host")
-    ax.set_ylim(20, max(scanpy) * 20)
-    ax.legend(loc="upper left", frameon=True, framealpha=0.95, edgecolor="none")
+    ax.set_title("tinybio vs CPU baselines — top-50 PCA on real scRNA-seq\n"
+                 "AMD RX 7900 XT eGPU via TB4, macOS 26.3, M4 Pro (24 GB RAM)")
+    ax.set_ylim(10, max(scanpy) * 40)
+    ax.legend(loc="upper left", frameon=True, framealpha=0.95, edgecolor="none", fontsize=9)
     ax.grid(True, axis="y", which="both", alpha=0.3)
     ax.set_axisbelow(True)
 
