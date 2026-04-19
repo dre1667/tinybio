@@ -20,6 +20,7 @@ import numpy as np
 import scanpy as sc
 from tinygrad import Tensor
 
+from tinybio import hvg, normalize
 from tinybio.pca import pca as tb_pca
 
 
@@ -29,23 +30,22 @@ N_RUNS = 5
 
 
 def load_and_prep() -> np.ndarray:
-    """PBMC3k -> CPM -> log1p -> top HVG by log-variance -> per-gene z-score."""
+    """PBMC3k -> CPM -> log1p -> top HVG by log-variance -> per-gene z-score.
+
+    All per-cell and per-gene normalization runs through the tinybio modules
+    on the GPU; HVG selection round-trips only the (n_genes,) variance vector
+    to CPU for the argpartition.
+    """
     adata = sc.datasets.pbmc3k()
     X = adata.X
     X = X.toarray() if hasattr(X, "toarray") else np.asarray(X)
-    X = X.astype(np.float32)
+    X = Tensor(X.astype(np.float32))
 
-    counts = X.sum(axis=1, keepdims=True)
-    X = np.log1p(X / counts * 1e6)
-
-    gene_var = X.var(axis=0)
-    top_idx = np.argsort(gene_var)[-N_TOP_HVG:]
-    X = X[:, top_idx]
-
-    mu = X.mean(axis=0, keepdims=True)
-    sigma = X.std(axis=0, keepdims=True)
-    X = (X - mu) / np.clip(sigma, 1e-12, None)
-    return X.astype(np.float32)
+    X = normalize.log1p(normalize.cpm(X))
+    idx = hvg.select_highly_variable(X, n_top=N_TOP_HVG)
+    X = X[:, idx.tolist()]
+    X = normalize.scale(X)
+    return X.realize().numpy()
 
 
 def tinygrad_pca(X_np: np.ndarray, n_components: int = N_COMPONENTS):
